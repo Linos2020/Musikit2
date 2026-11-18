@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Musikita</title>
+<style>
+html,body{margin:0;background:transparent;overflow:hidden}
+#ui{display:block;image-rendering:pixelated}
+#login{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 14px;font-size:14px;cursor:pointer;display:none}
+</style>
+</head>
+<body>
+<canvas id="ui" width="275" height="116"></canvas>
+<button id="login">Conectar con Spotify</button>
+<script>
+const CLIENT_ID = "0eae6d1cedca4eb5bceb64f5823312ed";
+const REDIRECT_URI = "https://Linos2020.github.io/musikit2/index.html";
+const SCOPES = "user-read-currently-playing user-read-playback-state";
+const ZOOM = 2; // 2 = 550x232 px en OBS
+
+const $ = (id) => document.getElementById(id);
+const cv = $("ui");
+cv.style.width = 275 * ZOOM + "px";
+cv.style.height = 116 * ZOOM + "px";
+let ctx = cv.getContext("2d");
+
+/* ================= Login con Spotify (PKCE) ================= */
+function randomString(n) {
+  const c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  return Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => c[b % c.length]).join("");
+}
+async function sha256Base64Url(t) {
+  const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
+  return btoa(String.fromCharCode(...new Uint8Array(h))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function login() {
+  const v = randomString(64);
+  localStorage.setItem("verifier", v);
+  const p = new URLSearchParams({
+    client_id: CLIENT_ID, response_type: "code", redirect_uri: REDIRECT_URI, scope: SCOPES,
+    code_challenge_method: "S256", code_challenge: await sha256Base64Url(v),
+  });
+  location.href = "https://accounts.spotify.com/authorize?" + p;
+}
+async function tokenRequest(body) {
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body),
+  });
+  if (!r.ok) throw new Error("token");
+  const d = await r.json();
+  localStorage.setItem("access_token", d.access_token);
+  if (d.refresh_token) localStorage.setItem("refresh_token", d.refresh_token);
+  localStorage.setItem("expires_at", Date.now() + d.expires_in * 1000 - 60000);
+}
+async function handleCallback() {
+  const code = new URLSearchParams(location.search).get("code");
+  if (!code) return;
+  await tokenRequest({ client_id: CLIENT_ID, grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI, code_verifier: localStorage.getItem("verifier") });
+  history.replaceState({}, "", REDIRECT_URI);
+}
+async function getToken() {
+  if (Date.now() > Number(localStorage.getItem("expires_at") || 0)) {
+    const rt = localStorage.getItem("refresh_token");
+    if (!rt) return null;
+    await tokenRequest({ client_id: CLIENT_ID, grant_type: "refresh_token", refresh_token: rt });
+  }
+  return localStorage.getItem("access_token");
+}
+
+/* ================= Estado de la canción ================= */
+let song = { n: 0, title: "", artist: "", progress: 0, duration: 0, playing: false, stamp: Date.now() };
+
+async function poll() {
+  try {
+    const token = await getToken();
+    if (!token) { $("login").style.display = "block"; return; }
+    $("login").style.display = "none";
+    const r = await fetch("https://api.spotify.com/v1/me/player/currently-playing", { headers: { Authorization: "Bearer " + token } });
+    if (r.status === 204) { song.playing = false; return; }
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.item) { song.playing = false; return; }
+    song = {
+      n: d.item.track_number || 1, title: d.item.name, artist: d.item.artists.map((a) => a.name).join(", "),
+      progress: d.progress_ms, duration: d.item.duration_ms, playing: d.is_playing, stamp: Date.now(),
+    };
+  } catch (e) { console.error(e); }
+}
+
+/* ================= Fuente bitmap (5 px de ancho, avance de 6) ================= */
+const F = {
+A:"01110,10001,10001,11111,10001,10001",B:"11110,10001,11110,10001,10001,11110",C:"01110,10001,10000,10000,10001,01110",
+D:"11110,10001,10001,10001,10001,11110",E:"11111,10000,11110,10000,10000,11111",F:"11111,10000,11110,10000,10000,10000",
+G:"01110,10000,10111,10001,10001,01110",H:"10001,10001,11111,10001,10001,10001",I:"01110,00100,00100,00100,00100,01110",
+J:"00111,00010,00010,00010,10010,01100",K:"10001,10010,11100,10010,10001,10001",L:"10000,10000,10000,10000,10000,11111",
+M:"10001,11011,10101,10101,10001,10001",N:"10001,11001,10101,10011,10001,10001",O:"01110,10001,10001,10001,10001,01110",
+P:"11110,10001,10001,11110,10000,10000",Q:"01110,10001,10001,10101,10010,01101",R:"11110,10001,10001,11110,10010,10001",
+S:"01111,10000,01110,00001,00001,11110",T:"11111,00100,00100,00100,00100,00100",U:"10001,10001,10001,10001,10001,01110",
+V:"10001,10001,10001,10001,01010,00100",W:"10001,10001,10101,10101,11011,10001",X:"10001,01010,00100,00100,01010,10001",
+Y:"10001,01010,00100,00100,00100,00100",Z:"11111,00001,00010,00100,01000,11111",
+a:"00000,00000,01110,00001,01111,01111",b:"10000,10000,11110,10001,10001,11110",c:"00000,00000,01110,10000,10001,01110",
+d:"00001,00001,01111,10001,10001,01111",e:"00000,00000,01110,11111,10000,01110",f:"00110,01000,11100,01000,01000,01000",
+g:"00000,01111,10001,10001,01111,00001,01110",h:"10000,10000,11110,10001,10001,10001",i:"00100,00000,01100,00100,00100,01110",
+j:"00010,00000,00110,00010,00010,00010,01100",k:"10000,10000,10010,11100,10010,10001",l:"01100,00100,00100,00100,00100,01110",
+m:"00000,00000,11010,10101,10101,10101",n:"00000,00000,11110,10001,10001,10001",o:"00000,00000,01110,10001,10001,01110",
+p:"00000,11110,10001,10001,11110,10000,10000",q:"00000,01111,10001,10001,01111,00001,00001",r:"00000,00000,10110,11000,10000,10000",
+s:"00000,00000,01111,01110,00001,11110",t:"01000,01000,11100,01000,01001,00110",u:"00000,00000,10001,10001,10001,01111",
+v:"00000,00000,10001,10001,01010,00100",w:"00000,00000,10001,10101,10101,01010",x:"00000,00000,10001,01010,01010,10001",
+y:"00000,10001,10001,10001,01111,00001,01110",z:"00000,00000,11111,00100,01000,11111",
+"0":"01110,10011,10101,10101,11001,01110","1":"00100,01100,00100,00100,00100,01110","2":"01110,10001,00010,00100,01000,11111",
+"3":"11110,00001,01110,00001,00001,11110","4":"00010,00110,01010,10010,11111,00010","5":"11111,10000,11110,00001,10001,01110",
+"6":"01110,10000,11110,10001,10001,01110","7":"11111,00001,00010,00100,01000,01000","8":"01110,10001,01110,10001,10001,01110",
+"9":"01110,10001,01111,00001,00001,01110"," ":"00000","-":"00000,00000,11111","." :"00000,00000,00000,00000,01100,01100",
+",":"00000,00000,00000,01100,00100,01000",":":"00000,01100,01100,00000,01100,01100","'":"00100,00100",
+"(":"00010,00100,00100,00100,00100,00010",")":"01000,00100,00100,00100,00100,01000","/":"00001,00010,00100,00100,01000,10000",
+"!":"00100,00100,00100,00100,00000,00100","?":"01110,10001,00010,00100,00000,00100","&":"01100,10010,01100,10101,10010,01101",
+"_":"00000,00000,00000,00000,00000,11111","+":"00000,00100,01110,00100","*":"00000,10101,01110,11111,01110,10101",
+"[":"01110,01000,01000,01000,01000,01110","]":"01110,00010,00010,00010,00010,01110","#":"01010,11111,01010,11111,01010,00000",
+};
+const clean = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const textW = (t) => Math.max(1, t.length * 6 - 1);
+
+function glyphs(c2, t, x, y, color) {
+  c2.fillStyle = color;
+  [...t].forEach((ch, i) => {
+    (F[ch] || F["?"]).split(",").forEach((row, ry) => {
+      for (let rx = 0; rx < 5; rx++) if (row[rx] === "1") c2.fillRect(x + i * 6 + rx, y + ry, 1, 1);
+    });
+  });
+}
+
+/* ================= Utilidades de dibujo ================= */
+const R = (c, x, y, w, h) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
+const hx = (c) => [1, 3, 5].map((i) => parseInt(c.substr(i, 2), 16));
+const mix = (a, b, t) => "rgb(" + a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",") + ")";
+function vgrad(x, y, w, h, top, bot) {
+  const a = hx(top), b = hx(bot);
+  for (let i = 0; i < h; i++) R(mix(a, b, h > 1 ? i / (h - 1) : 0), x, y + i, w, 1);
+}
+function hgrad(x, y, w, h, left, right) {
+  const a = hx(left), b = hx(right);
+  for (let i = 0; i < w; i++) R(mix(a, b, w > 1 ? i / (w - 1) : 0), x + i, y, 1, h);
+}
+function raised(x, y, w, h) {
+  R("#12121c", x, y, w, h);
+  vgrad(x + 1, y + 1, w - 2, h - 2, "#7d7f9b", "#4a4c66");
+  R("#aeb0ca", x + 1, y + 1, w - 2, 1); R("#aeb0ca", x + 1, y + 1, 1, h - 2);
+  R("#272840", x + 1, y + h - 2, w - 2, 1); R("#272840", x + w - 2, y + 1, 1, h - 2);
+}
+function sunken(x, y, w, h, fill = "#000") {
+  R("#7f819c", x, y, w, h); R("#0b0b12", x, y, w - 1, h - 1); R(fill, x + 1, y + 1, w - 2, h - 2);
+}
+const triR = (x, y, h, c) => { const m = (h - 1) / 2; for (let i = 0; i < h; i++) R(c, x, y + i, Math.round(m + 1 - Math.abs(i - m)), 1); };
+const triL = (x, y, h, c) => { const m = (h - 1) / 2; for (let i = 0; i < h; i++) { const w = Math.round(m + 1 - Math.abs(i - m)); R(c, x + (m + 1 - w), y + i, w, 1); } };
+function bmp(rows, x, y, c) { rows.forEach((r, j) => [...r].forEach((ch, i) => { if (ch === "X") R(c, x + i, y + j, 1, 1); })); }
+
+/* ================= Capa fija (se dibuja una sola vez) ================= */
+const GREEN = "#00e800", ICON = "#d6d7ea";
+const base = document.createElement("canvas");
+base.width = 275; base.height = 116;
+
+function buildBase() {
+  const real = ctx;
+  ctx = base.getContext("2d"); // las utilidades dibujan sobre la capa fija
+  drawStatic();
+  ctx = real;
+}
+
+function drawStatic() {
+  // Ventana
+  vgrad(0, 0, 275, 116, "#565871", "#363850");
+  R("#9fa1bc", 0, 0, 275, 1); R("#9fa1bc", 0, 0, 1, 116);
+  R("#0f0f18", 0, 115, 275, 1); R("#0f0f18", 274, 0, 1, 116);
+
+  // Barra de título
+  vgrad(1, 1, 273, 12, "#3c3d57", "#232437");
+  for (const [a, z] of [[6, 108], [166, 240]]) {
+    for (let y = 3; y <= 9; y += 2) { R("#b4a55a", a, y, z - a, 1); R("#4a4222", a, y + 1, z - a, 1); }
+  }
+  R("#232437", 110, 2, 55, 10);
+  glyphs(b2(), "MUSIKITA", 114, 4, "#d4d5e8");
+  for (const [bx, k] of [[244, 0], [254, 1], [264, 2]]) {
+    raised(bx, 3, 9, 9);
+    if (k === 0) R(ICON, bx + 2, 8, 5, 1);
+    if (k === 1) R(ICON, bx + 2, 6, 5, 1);
+    if (k === 2) bmp(["X.....X", ".X...X.", "..X.X..", "...X...", "..X.X..", ".X...X.", "X.....X"], bx + 1, 4, ICON);
+  }
+
+  // Pantalla izquierda y letras O A I D V
+  sunken(9, 22, 95, 42);
+  [..."OAIDV"].forEach((l, i) => glyphs(b2(), l, 12, 24 + i * 8, "#8a8ba6"));
+
+  // Título, kbps, kHz, mono, stereo
+  sunken(109, 22, 158, 12);
+  sunken(109, 40, 22, 12); glyphs(b2(), "128", 111, 43, GREEN);
+  glyphs(b2(), "kbps", 134, 43, "#bcbdd4");
+  sunken(154, 40, 16, 12); glyphs(b2(), "44", 156, 43, GREEN);
+  glyphs(b2(), "kHz", 173, 43, "#bcbdd4");
+  glyphs(b2(), "mono", 212, 43, "#5a5b74");
+  glyphs(b2(), "stereo", 239, 43, GREEN);
+
+  // Volumen y balance
+  sunken(107, 56, 68, 12, "#000"); hgrad(108, 57, 66, 10, "#5a3d0e", "#f0a828");
+  sunken(177, 56, 38, 12, "#000"); hgrad(178, 57, 18, 10, "#17501c", "#34c63f"); hgrad(196, 57, 18, 10, "#34c63f", "#17501c");
+  for (const tx of [107 + Math.round(0.6 * 54), 177 + 12]) {
+    R("#12121c", tx, 55, 14, 14); vgrad(tx + 1, 56, 12, 12, "#dcdcec", "#9a9bb4");
+    R("#ffffff", tx + 1, 56, 12, 1); R("#5a5b74", tx + 1, 67, 12, 1); R("#5a5b74", tx + 12, 56, 1, 12);
+  }
+
+  // EQ y PL
+  raised(219, 57, 23, 12); glyphs(b2(), "EQ", 225, 60, GREEN);
+  raised(242, 57, 23, 12); glyphs(b2(), "PL", 248, 60, GREEN);
+
+  // Barra de posición
+  sunken(16, 71, 248, 10, "#0b0c14");
+
+  // Botones
+  const ys = 88;
+  [16, 39, 62, 85, 108].forEach((bx) => raised(bx, ys, 23, 18));
+  R(ICON, 24, 92, 2, 9); triL(26, 92, 9, ICON);            // anterior
+  triR(48, 92, 9, ICON);                                   // play
+  R(ICON, 70, 92, 3, 9); R(ICON, 75, 92, 3, 9);            // pausa
+  R(ICON, 93, 93, 8, 8);                                   // stop
+  triR(116, 92, 9, ICON); R(ICON, 122, 92, 2, 9);          // siguiente
+  raised(136, 89, 22, 16);
+  for (let i = 0; i < 4; i++) R(ICON, 146 - i, 93 + i, 2 * i + 1, 1);
+  R(ICON, 142, 98, 9, 2);                                  // eject
+  raised(164, 89, 47, 15); glyphs(b2(), "SHUFFLE", 167, 93, GREEN);
+  raised(211, 89, 28, 15);
+  bmp(["..XXXXXX..", ".X......X.", "X........X", "X.....XXXX", "X.......X.", ".X.....X..", "..XXXXX..."], 220, 93, ICON);
+}
+const b2 = () => ctx;
+
+/* ================= Reloj de 7 segmentos ================= */
+const SEG = { 0:"abcdef",1:"bc",2:"abdeg",3:"abcdg",4:"bcfg",5:"acdfg",6:"acdefg",7:"abc",8:"abcdefg",9:"abcdfg" };
+const SR = { a:[1,0,7,2], b:[7,1,2,5], c:[7,7,2,5], d:[1,11,7,2], e:[0,7,2,5], f:[0,1,2,5], g:[1,5,7,2] };
+const DX = [48, 60, 78, 90];
+function drawTime(ms) {
+  const s = Math.floor(ms / 1000);
+  const str = String(Math.min(99, Math.floor(s / 60))).padStart(2, "0") + String(s % 60).padStart(2, "0");
+  [...str].forEach((d, i) => (SEG[d] || "").split("").forEach((k) => {
+    const [x, y, w, h] = SR[k];
+    R(GREEN, DX[i] + x, 26 + y, w, h);
+  }));
+  R(GREEN, 72, 30, 2, 2); R(GREEN, 72, 35, 2, 2);
+}
+
+/* ================= Visualizador ================= */
+const lv = Array(19).fill(0), pk = Array(19).fill(0);
+const barColor = (r) => (r >= 13 ? "#d83a1c" : r >= 10 ? "#e47a18" : r >= 7 ? "#d9c71f" : r >= 3 ? "#8ad820" : "#1fcf1f");
+function drawVis() {
+  const t = Date.now() / 1000;
+  for (let i = 0; i < 19; i++) {
+    const wave = 0.5 + 0.5 * Math.sin(t * (2 + i * 0.37) + i * 1.7);
+    const target = song.playing ? (0.25 + 0.75 * (0.6 * wave + 0.4 * Math.random())) * 16 * (1 - (i / 19) * 0.45) : 0;
+    lv[i] += (target - lv[i]) * (target > lv[i] ? 0.6 : 0.18);
+    pk[i] = lv[i] > pk[i] ? lv[i] : Math.max(0, pk[i] - 0.2);
+    const h = Math.min(16, Math.round(lv[i]));
+    for (let r = 0; r < h; r++) R(barColor(r), 24 + i * 4, 58 - r, 3, 1);
+    if (pk[i] >= 1) R("#c8c8d4", 24 + i * 4, 58 - Math.min(15, Math.round(pk[i])), 3, 1);
+  }
+}
+
+/* ================= Título que corre de derecha a izquierda ================= */
+let strip = null, stripW = 0, lastText = "";
+function setTitle(text) {
+  const t = clean(text);
+  stripW = textW(t) + 40;
+  strip = document.createElement("canvas");
+  strip.width = stripW; strip.height = 7;
+  glyphs(strip.getContext("2d"), t, 0, 0, GREEN);
+}
+function drawTitle() {
+  const m = (s) => String(Math.floor(s / 60)) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+  const text = song.title ? song.n + ". " + song.artist + " - " + song.title + " (" + m(song.duration / 1000) + ")" : "Musikita - esperando musica...";
+  if (text !== lastText) { lastText = text; setTitle(text); }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(111, 25, 153, 8); ctx.clip();
+  const off = ((Date.now() / 1000) * 30) % stripW;
+  for (let x = 111 - off; x < 264; x += stripW) ctx.drawImage(strip, Math.round(x), 25);
+  ctx.restore();
+}
+
+/* ================= Dibujo general ================= */
+function draw() {
+  ctx.drawImage(base, 0, 0);
+
+  const pos = Math.min(song.progress + (song.playing ? Date.now() - song.stamp : 0), song.duration || 0);
+  const pct = song.duration ? pos / song.duration : 0;
+
+  // Indicador de reproducción
+  if (song.playing) triR(26, 28, 9, GREEN);
+  else if (song.title) { R(GREEN, 26, 28, 3, 9); R(GREEN, 31, 28, 3, 9); }
+  else R(GREEN, 26, 29, 7, 7);
+
+  drawTime(pos);
+  drawVis();
+  drawTitle();
+
+  // Cursor de la barra de posición
+  const tx = 16 + Math.round(pct * (248 - 29));
+  R("#12121c", tx, 71, 29, 10); vgrad(tx + 1, 72, 27, 8, "#f4eeb0", "#b9a955");
+  R("#fffbd0", tx + 1, 72, 27, 1); R("#6a5a20", tx + 1, 79, 27, 1); R("#6a5a20", tx + 27, 72, 1, 8);
+}
+
+/* ================= Arranque ================= */
+$("login").addEventListener("click", login);
+buildBase();
+(async () => {
+  await handleCallback();
+  await poll();
+  setInterval(poll, 3000);
+  setInterval(draw, 40);
+})();
+</script>
+</body>
+</html>
